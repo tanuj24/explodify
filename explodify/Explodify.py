@@ -12,21 +12,20 @@ class Explodify:
         Returns all the array fields in a nested spark dataframe schema
         Args:
             schema: pyspark dataframe schema
-            prefix: prefix to add to the arrayfields
+            prefix: prefix to access the nested array field
         """
         array_fields = []
         for field in schema.fields:
             name = f"{prefix}.{field.name}" if prefix else field.name
             dtype = field.dataType
-            if isinstance(dtype, t.ArrayType):
-                if isinstance(dtype.elementType, t.StructType):
-                    array_fields.append(name)
+            if isinstance(dtype, t.ArrayType) and isinstance(dtype.elementType, t.StructType):
+                array_fields.append(name)
             if isinstance(dtype, t.StructType):
-                array_fields = array_fields + Explodify.get_array_type_fields(dtype, prefix=name)
+                array_fields += Explodify.get_array_type_fields(dtype, prefix=name)
         return array_fields
 
     @staticmethod
-    def explode_recurse(df, _dict=dict(), generic=[], array_col_set=set(), prefix=None):
+    def explode_recurse(df, collector=dict(), generic=[], array_col_set=set(), prefix=None):
         """
         Recursively convert each struct in the nested df into a separate dataframe in a dictonary.
         Explodes the arrays if present.
@@ -37,21 +36,37 @@ class Explodify:
             array_col_set: set containing array columns of prev level
         """
         schema = df.schema
-        select=[]
         fields = Explodify.get_array_type_fields(schema)
-        _array_col_set=set(array_col_set)
-        for _f in fields:
+        array_col_set=set(array_col_set)
+
+        for field in fields:
             if prefix is not None:
-                _lst=_f.split('.')
-                _key=f"{prefix}.{'.'.join(_lst[1:])}"
-            else: _key = _f
-            _select= generic + [F.posexplode(_f).alias(f"{_f.split('.')[-1]}@rankid",_f.split('.')[-1])]
-            _dict[_key]=df.select(_select)
-            _gen = generic+[f"{_f.split('.')[-1]}@rankid"]
-            _array_col_set.add(_f.split('.')[-1])
-            _dict, _array_col_set = Explodify.explode_recurse(_dict[_key], _dict,_gen,_array_col_set, prefix=_key)
-        _cols = df.columns
-        for _col in _cols:
-            if _col not in generic and _col not in _array_col_set:
-                _dict[_col] = df.select(generic+[_col])
-        return _dict,_array_col_set
+                feild_key=f"{prefix}.{'.'.join(field.split('.')[1:])}"
+            else:
+                feild_key = field
+
+            select= generic + [F.posexplode(field).alias(f"{field.split('.')[-1]}@rankid",field.split('.')[-1])]
+            collector[feild_key]=df.select(select)
+            _generic = generic+[f"{field.split('.')[-1]}@rankid"]
+            array_col_set.add(field.split('.')[-1])
+
+            collector, array_col_set = Explodify.explode_recurse(
+                collector[feild_key],
+                collector,
+                _generic,
+                array_col_set,
+                prefix=feild_key
+            )
+
+        cols = df.columns
+        for _col in cols:
+            if _col not in generic and _col not in array_col_set:
+                collector[_col] = df.select(generic+[_col])
+        return collector,array_col_set
+
+    def explode(self, df, pks=[]):
+        dfs = {}
+        unflat_dfs = self.explode(df, generic=pks)
+        for k,v in unflat_dfs.items():
+            dfs[k] = UnfoldDF.flatten_df(v,skipArrays=True)
+        return dfs
